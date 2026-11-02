@@ -123,8 +123,63 @@ __global__ void qk_scores(const float* q, const float* k,
     }
 }
 
-# Step 10 - softmax_rows (not yet solved)
-# TODO: implement
+# Step 10 - softmax_rows
+__global__ void softmax_rows(float* matrix, int rows, int cols) {
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+
+    extern __shared__ float sdata[];
+
+    int offset = row * cols;
+
+    // Step 1: Find row maximum
+    float local_max = -INFINITY;
+
+    for (int i = tid; i < cols; i += blockDim.x) {
+        local_max = fmaxf(local_max, matrix[offset + i]);
+    }
+
+    sdata[tid] = local_max;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            sdata[tid] = fmaxf(sdata[tid], sdata[tid + stride]);
+        }
+        __syncthreads();
+    }
+
+    float row_max = sdata[0];
+    __syncthreads();
+
+    // Step 2: Compute exponentials and local sum
+    float local_sum = 0.0f;
+
+    for (int i = tid; i < cols; i += blockDim.x) {
+        float val = expf(matrix[offset + i] - row_max);
+        matrix[offset + i] = val;
+        local_sum += val;
+    }
+
+    sdata[tid] = local_sum;
+    __syncthreads();
+
+    // Step 3: Reduce sum
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            sdata[tid] += sdata[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    float row_sum = sdata[0];
+    __syncthreads();
+
+    // Step 4: Normalize
+    for (int i = tid; i < cols; i += blockDim.x) {
+        matrix[offset + i] /= row_sum;
+    }
+}
 
 # Step 11 - pv_matmul (not yet solved)
 # TODO: implement
