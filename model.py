@@ -197,8 +197,42 @@ __global__ void pv_matmul(const float* p, const float* v, float* out, int seq_le
     }
 }
 
-# Step 12 - naive_attention (not yet solved)
-# TODO: implement
+# Step 12 - naive_attention
+void naive_attention(const float* d_q, const float* d_k,
+                     const float* d_v, float* d_out,
+                     int seq_len, int head_dim) {
+    float* d_scores;
+
+    // Allocate intermediate attention score matrix
+    cudaMalloc(&d_scores, seq_len * seq_len * sizeof(float));
+
+    // Stage 1: Compute Q * K^T
+    dim3 block1(16, 16);
+    dim3 grid1((seq_len + 15) / 16, (seq_len + 15) / 16);
+
+    qk_scores<<<grid1, block1>>>(
+        d_q, d_k, d_scores, seq_len, head_dim
+    );
+
+    // Stage 2: Apply row-wise softmax
+    int threads = 128;
+    int shared_mem = threads * sizeof(float);
+
+    softmax_rows<<<seq_len, threads, shared_mem>>>(
+        d_scores, seq_len, seq_len
+    );
+
+    // Stage 3: Compute P * V
+    dim3 block3(16, 16);
+    dim3 grid3((head_dim + 15) / 16, (seq_len + 15) / 16);
+
+    pv_matmul<<<grid3, block3>>>(
+        d_scores, d_v, d_out, seq_len, head_dim
+    );
+
+    // Free intermediate buffer
+    cudaFree(d_scores);
+}
 
 # Step 13 - online_max (not yet solved)
 # TODO: implement
