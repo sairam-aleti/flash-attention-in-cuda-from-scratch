@@ -331,8 +331,20 @@ __device__ void tile_rowmax(const float* s_tile,
     }
 }
 
-# Step 20 - tile_exp (not yet solved)
-# TODO: implement
+# Step 20 - tile_exp
+#include <cmath>
+
+__device__ void tile_exp(float* s_tile, const float* row_max,
+                         int tile_q, int tile_k,
+                         int thread_id, int num_threads) {
+    int total = tile_q * tile_k;
+
+    for (int idx = thread_id; idx < total; idx += num_threads) {
+        int r = idx / tile_k;
+
+        s_tile[idx] = expf(s_tile[idx] - row_max[r]);
+    }
+}
 
 # Step 21 - tile_rowsum (not yet solved)
 # TODO: implement
