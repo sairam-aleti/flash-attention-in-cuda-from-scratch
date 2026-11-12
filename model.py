@@ -387,8 +387,158 @@ __device__ void accumulate_pv(const float* p_tile,
     }
 }
 
-# Step 23 - flash_attention_kernel (not yet solved)
-# TODO: implement
+# Step 23 - flash_attention_kernel
+__global__ void flash_attention_kernel(const float* q, const float* k,
+                                       const float* v, float* out,
+                                       int seq_len, int head_dim,
+                                       int tile_q, int tile_k, float scale) {
+    extern __shared__ float smem[];
+
+    int tid = threadIdx.x;
+    int nt = blockDim.x;
+
+    int q_start = blockIdx.x * tile_q;
+    int q_rows = min(tile_q, seq_len - q_start);
+
+    // Shared memory layout.
+    float* qt = smem;
+    float* kt = qt + tile_q * head_dim;
+    float* vt = kt + tile_k * head_dim;
+    float* scores = vt + tile_k * head_dim;
+    float* acc = scores + tile_q * tile_k;
+
+    float* m = acc + tile_q * head_dim;
+    float* l = m + tile_q;
+    float* mb = l + tile_q;
+    float* lb = mb + tile_q;
+
+    // Initialize accumulator and online softmax statistics.
+    for (int i = tid; i < tile_q * head_dim; i += nt)
+        acc[i] = 0.0f;
+
+    for (int i = tid; i < tile_q; i += nt) {
+        m[i] = -INFINITY;
+        l[i] = 0.0f;
+        mb[i] = -INFINITY;
+        lb[i] = 0.0f;
+    }
+
+    __syncthreads();
+
+    // Load Q tile ONCE.
+    load_tile(q, qt,
+              q_start, 0,
+              seq_len, head_dim,
+              tile_q, head_dim,
+              tid, nt);
+
+    __syncthreads();
+
+    // Stream through K/V tiles.
+    for (int ks = 0; ks < seq_len; ks += tile_k) {
+
+        int kr = min(tile_k, seq_len - ks);
+
+        load_tile(k, kt,
+                  ks, 0,
+                  seq_len, head_dim,
+                  tile_k, head_dim,
+                  tid, nt);
+
+        load_tile(v, vt,
+                  ks, 0,
+                  seq_len, head_dim,
+                  tile_k, head_dim,
+                  tid, nt);
+
+        __syncthreads();
+
+        // Compute QK^T.
+        tile_scores(qt, kt, scores,
+                    tile_q, tile_k, head_dim,
+                    scale, tid, nt);
+
+        __syncthreads();
+
+        // Mask invalid query and key positions.
+        for (int i = tid; i < tile_q * tile_k; i += nt) {
+            int r = i / tile_k;
+            int c = i % tile_k;
+
+            if (r >= q_rows || c >= kr)
+                scores[i] = -INFINITY;
+        }
+
+        __syncthreads();
+
+        // Find maximum score in current tile.
+        tile_rowmax(scores, mb,
+                    tile_q, tile_k, tid, nt);
+
+        __syncthreads();
+
+        // Update running maximum and rescale previous results.
+        for (int r = tid; r < tile_q; r += nt) {
+
+            float old_max = m[r];
+            float new_max = online_max(old_max, mb[r]);
+
+            float correction =
+                correction_factor(old_max, new_max);
+
+            lb[r] = correction;
+
+            rescale_output(acc + r * head_dim,
+                           head_dim, correction);
+
+            l[r] *= correction;
+
+            m[r] = new_max;
+        }
+
+        __syncthreads();
+
+        // Exponentiate using updated running maximum.
+        tile_exp(scores, m,
+                 tile_q, tile_k, tid, nt);
+
+        __syncthreads();
+
+        // Sum exponentials for current tile.
+        tile_rowsum(scores, mb,
+                    tile_q, tile_k, tid, nt);
+
+        __syncthreads();
+
+        // Update running denominator.
+        for (int r = tid; r < tile_q; r += nt) {
+            l[r] = update_running_sum(
+                l[r], 1.0f, mb[r]
+            );
+        }
+
+        __syncthreads();
+
+        // Accumulate weighted values.
+        accumulate_pv(scores, vt, acc,
+                      tile_q, tile_k, head_dim,
+                      tid, nt);
+
+        __syncthreads();
+    }
+
+    // Normalize and write output.
+    for (int i = tid; i < q_rows * head_dim; i += nt) {
+
+        int r = i / head_dim;
+        int d = i % head_dim;
+
+        out[(q_start + r) * head_dim + d] =
+            l[r] > 0.0f
+            ? acc[r * head_dim + d] / l[r]
+            : 0.0f;
+    }
+}
 
 # Step 24 - flash_attention_launcher (not yet solved)
 # TODO: implement
