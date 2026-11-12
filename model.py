@@ -540,8 +540,39 @@ __global__ void flash_attention_kernel(const float* q, const float* k,
     }
 }
 
-# Step 24 - flash_attention_launcher (not yet solved)
-# TODO: implement
+# Step 24 - flash_attention_launcher
+void flash_attention_launcher(const float* d_q, const float* d_k,
+                              const float* d_v, float* d_out,
+                              int seq_len, int head_dim,
+                              int tile_q, int tile_k) {
+
+    // One block per query tile.
+    int blocks = (seq_len + tile_q - 1) / tile_q;
+
+    // 128 threads per block.
+    int threads = 128;
+
+    // Calculate scaling factor.
+    float scale = 1.0f / sqrtf((float)head_dim);
+
+    // Calculate dynamic shared memory.
+    size_t smem_elements =
+        tile_q * head_dim +       // Q tile
+        tile_k * head_dim +       // K tile
+        tile_k * head_dim +       // V tile
+        tile_q * tile_k +         // Score tile
+        tile_q * head_dim +       // Output accumulator
+        4 * tile_q;               // Running statistics
+
+    size_t smem_bytes = smem_elements * sizeof(float);
+
+    // Launch Flash Attention kernel.
+    flash_attention_kernel<<<blocks, threads, smem_bytes>>>(
+        d_q, d_k, d_v, d_out,
+        seq_len, head_dim,
+        tile_q, tile_k, scale
+    );
+}
 
 # Step 25 - causal_mask (not yet solved)
 # TODO: implement
